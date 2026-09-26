@@ -37,6 +37,32 @@ def make_block_keys(name, country):
     ]
 
 
+def get_candidates(source1_record, source2_index, source3_index):
+    """
+    Generate Source2 and Source3 candidate IDs
+    for one Source1 record.
+    """
+
+    candidates2 = set()
+    candidates3 = set()
+
+    keys = make_block_keys(
+        source1_record["business_name"],
+        source1_record["country"]
+    )
+
+    for key in keys:
+        candidates2.update(
+            source2_index.get(key, set())
+        )
+
+        candidates3.update(
+            source3_index.get(key, set())
+        )
+
+    return candidates2, candidates3
+
+
 # --------------------------------------------------
 # Load Source 1 sample
 # --------------------------------------------------
@@ -151,18 +177,11 @@ for _, row in source1.iterrows():
 
     source1_id = row["entity_id"]
 
-    candidates2 = set()
-    candidates3 = set()
-
-    for key in row["block_keys"]:
-
-        candidates2.update(
-            source2_index.get(key, set())
-        )
-
-        candidates3.update(
-            source3_index.get(key, set())
-        )
+    candidates2, candidates3 = get_candidates(
+        row,
+        source2_index,
+        source3_index
+    )
 
     total_source2_candidates += len(candidates2)
     total_source3_candidates += len(candidates3)
@@ -186,10 +205,22 @@ for _, row in source1.iterrows():
 
     evaluated += 1
 
-    if true_ids.intersection(candidates2):
+    source2_true_ids = {
+        entity_id
+        for entity_id in true_ids
+        if entity_id.startswith("S2-")
+    }
+
+    source3_true_ids = {
+        entity_id
+        for entity_id in true_ids
+        if entity_id.startswith("S3-")
+    }
+
+    if source2_true_ids.intersection(candidates2):
         source2_found += 1
 
-    if true_ids.intersection(candidates3):
+    if source3_true_ids.intersection(candidates3):
         source3_found += 1
 
 
