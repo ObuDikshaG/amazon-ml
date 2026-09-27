@@ -8,6 +8,8 @@ CHUNK_SIZE = 100000
 
 
 def normalize_text(value):
+    """Normalize text for blocking."""
+
     if pd.isna(value):
         return ""
 
@@ -20,12 +22,17 @@ def normalize_text(value):
 
 
 def create_name_tokens(value):
+    """Create up to three useful name tokens."""
+
     words = value.split()
     words = [word for word in words if len(word) >= 3]
+
     return words[:3]
 
 
 def make_block_keys(name, country):
+    """Create blocking keys from business name and country."""
+
     name = normalize_text(name)
     country = normalize_text(country)
 
@@ -63,207 +70,200 @@ def get_candidates(source1_record, source2_index, source3_index):
     return candidates2, candidates3
 
 
-# --------------------------------------------------
-# Load Source 1 sample
-# --------------------------------------------------
+def build_block_index(file_path, chunksize=CHUNK_SIZE):
+    """
+    Build a blocking index from a TSV file.
 
-print("Loading Source 1...")
+    Returns:
+        index:
+            blocking key -> set of entity IDs
 
-source1 = pd.read_csv(
-    "dataset/train/train_source1.tsv",
-    sep="\t",
-    nrows=SAMPLE_SIZE
-)
+        records:
+            entity ID -> complete record
+    """
 
-ground_truth = pd.read_csv(
-    "dataset/train/train_ground_truth.tsv",
-    sep="\t",
-    nrows=SAMPLE_SIZE
-)
+    index = {}
+    records = {}
 
-source1["block_keys"] = source1.apply(
-    lambda row: make_block_keys(
-        row["business_name"],
-        row["country"]
-    ),
-    axis=1
-)
+    for chunk in pd.read_csv(
+        file_path,
+        sep="\t",
+        chunksize=chunksize
+    ):
+
+        for _, row in chunk.iterrows():
+
+            record = row.to_dict()
+
+            entity_id = record.get("entity_id")
+
+            if pd.isna(entity_id):
+                continue
+
+            entity_id = str(entity_id)
+
+            records[entity_id] = record
+
+            keys = make_block_keys(
+                record.get("business_name", ""),
+                record.get("country", "")
+            )
+
+            for key in keys:
+
+                index.setdefault(
+                    key,
+                    set()
+                ).add(entity_id)
+
+    return index, records
 
 
-# --------------------------------------------------
-# Build Source 2 index using ALL rows
-# --------------------------------------------------
-
-print("\nBuilding Source 2 index...")
-
-source2_index = {}
-source2_ids = {}
-
-for chunk in pd.read_csv(
-    "dataset/train/train_source2.tsv",
-    sep="\t",
-    chunksize=CHUNK_SIZE
+def evaluate_blocking(
+    source1_path,
+    source2_path,
+    source3_path,
+    ground_truth_path,
+    sample_size=SAMPLE_SIZE
 ):
+    """
+    Evaluate blocking recall on a Source1 sample.
+    """
 
-    for _, row in chunk.iterrows():
+    print("Loading Source 1...")
 
-        entity_id = row["entity_id"]
-
-        keys = make_block_keys(
-            row["business_name"],
-            row["country"]
-        )
-
-        source2_ids[entity_id] = keys
-
-        for key in keys:
-
-            source2_index.setdefault(
-                key, set()
-            ).add(entity_id)
-
-    print("Processed Source 2 chunk")
-
-
-# --------------------------------------------------
-# Build Source 3 index using ALL rows
-# --------------------------------------------------
-
-print("\nBuilding Source 3 index...")
-
-source3_index = {}
-source3_ids = {}
-
-for chunk in pd.read_csv(
-    "dataset/train/train_source3.tsv",
-    sep="\t",
-    chunksize=CHUNK_SIZE
-):
-
-    for _, row in chunk.iterrows():
-
-        entity_id = row["entity_id"]
-
-        keys = make_block_keys(
-            row["business_name"],
-            row["country"]
-        )
-
-        source3_ids[entity_id] = keys
-
-        for key in keys:
-
-            source3_index.setdefault(
-                key, set()
-            ).add(entity_id)
-
-    print("Processed Source 3 chunk")
-
-
-# --------------------------------------------------
-# Evaluate blocking
-# --------------------------------------------------
-
-source2_found = 0
-source3_found = 0
-
-total_source2_candidates = 0
-total_source3_candidates = 0
-
-evaluated = 0
-
-
-for _, row in source1.iterrows():
-
-    source1_id = row["entity_id"]
-
-    candidates2, candidates3 = get_candidates(
-        row,
-        source2_index,
-        source3_index
+    source1 = pd.read_csv(
+        source1_path,
+        sep="\t",
+        nrows=sample_size
     )
 
-    total_source2_candidates += len(candidates2)
-    total_source3_candidates += len(candidates3)
-
-    truth = ground_truth[
-        ground_truth["source1_entity_id"]
-        == source1_id
-    ]
-
-    if len(truth) == 0:
-        continue
-
-    matched = truth.iloc[0]["matched_entity_ids"]
-
-    if pd.isna(matched):
-        continue
-
-    true_ids = set(
-        str(matched).split(",")
+    ground_truth = pd.read_csv(
+        ground_truth_path,
+        sep="\t"
     )
 
-    evaluated += 1
+    print("\nBuilding Source 2 index...")
 
-    source2_true_ids = {
-        entity_id
-        for entity_id in true_ids
-        if entity_id.startswith("S2-")
-    }
+    source2_index, _ = build_block_index(
+        source2_path
+    )
 
-    source3_true_ids = {
-        entity_id
-        for entity_id in true_ids
-        if entity_id.startswith("S3-")
-    }
+    print("Source 2 index built.")
 
-    if source2_true_ids.intersection(candidates2):
-        source2_found += 1
+    print("\nBuilding Source 3 index...")
 
-    if source3_true_ids.intersection(candidates3):
-        source3_found += 1
+    source3_index, _ = build_block_index(
+        source3_path
+    )
 
+    print("Source 3 index built.")
 
-# --------------------------------------------------
-# Results
-# --------------------------------------------------
+    source2_found = 0
+    source3_found = 0
 
-print("\n======================================")
-print("BLOCKING EVALUATION")
-print("======================================")
+    total_source2_candidates = 0
+    total_source3_candidates = 0
 
-print("Source 1 sample:", SAMPLE_SIZE)
+    evaluated = 0
 
-print("Source 1 records evaluated:", evaluated)
+    for _, row in source1.iterrows():
 
-print(
-    "\nAverage Source 2 candidates:",
-    total_source2_candidates / SAMPLE_SIZE
-)
+        source1_id = row["entity_id"]
 
-print(
-    "Average Source 3 candidates:",
-    total_source3_candidates / SAMPLE_SIZE
-)
+        candidates2, candidates3 = get_candidates(
+            row,
+            source2_index,
+            source3_index
+        )
 
-print(
-    "\nSource 2 records with at least one true match captured:",
-    source2_found
-)
+        total_source2_candidates += len(candidates2)
+        total_source3_candidates += len(candidates3)
 
-print(
-    "Source 3 records with at least one true match captured:",
-    source3_found
-)
+        truth = ground_truth[
+            ground_truth["source1_entity_id"]
+            == source1_id
+        ]
 
-if evaluated > 0:
+        if len(truth) == 0:
+            continue
+
+        matched = truth.iloc[0]["matched_entity_ids"]
+
+        if pd.isna(matched):
+            continue
+
+        true_ids = set(
+            str(matched).split(",")
+        )
+
+        evaluated += 1
+
+        source2_true_ids = {
+            entity_id
+            for entity_id in true_ids
+            if entity_id.startswith("S2-")
+        }
+
+        source3_true_ids = {
+            entity_id
+            for entity_id in true_ids
+            if entity_id.startswith("S3-")
+        }
+
+        if source2_true_ids.intersection(candidates2):
+            source2_found += 1
+
+        if source3_true_ids.intersection(candidates3):
+            source3_found += 1
+
+    print("\n======================================")
+    print("BLOCKING EVALUATION")
+    print("======================================")
+
+    print("Source 1 sample:", sample_size)
+    print("Source 1 records evaluated:", evaluated)
+
+    if sample_size > 0:
+
+        print(
+            "\nAverage Source 2 candidates:",
+            total_source2_candidates / sample_size
+        )
+
+        print(
+            "Average Source 3 candidates:",
+            total_source3_candidates / sample_size
+        )
 
     print(
-        "\nSource 2 blocking recall:",
-        source2_found / evaluated
+        "\nSource 2 records with at least one true match captured:",
+        source2_found
     )
 
     print(
-        "Source 3 blocking recall:",
-        source3_found / evaluated
+        "Source 3 records with at least one true match captured:",
+        source3_found
+    )
+
+    if evaluated > 0:
+
+        print(
+            "\nSource 2 blocking recall:",
+            source2_found / evaluated
+        )
+
+        print(
+            "Source 3 blocking recall:",
+            source3_found / evaluated
+        )
+
+
+if __name__ == "__main__":
+
+    evaluate_blocking(
+        "dataset/train/train_source1.tsv",
+        "dataset/train/train_source2.tsv",
+        "dataset/train/train_source3.tsv",
+        "dataset/train/train_ground_truth.tsv"
     )
