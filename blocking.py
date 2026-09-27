@@ -5,7 +5,7 @@ import unicodedata
 
 SAMPLE_SIZE = 10000
 CHUNK_SIZE = 100000
-
+MAX_BLOCK_SIZE = 5000
 
 def normalize_text(value):
     """Normalize text for blocking."""
@@ -22,27 +22,83 @@ def normalize_text(value):
 
 
 def create_name_tokens(value):
-    """Create up to three useful name tokens."""
+    """Create informative business-name tokens."""
 
     words = value.split()
-    words = [word for word in words if len(word) >= 3]
 
-    return words[:3]
+    stopwords = {
+        "inc", "incorporated",
+        "llc", "ltd", "limited",
+        "corp", "corporation",
+        "company", "co",
+        "private", "pvt",
+        "plc"
+    }
+
+    words = [
+        word for word in words
+        if len(word) >= 3 and word not in stopwords
+    ]
+
+    return words[:4]
 
 
-def make_block_keys(name, country):
-    """Create blocking keys from business name and country."""
+def make_block_keys(name, country, address):
+    """Create multiple selective blocking keys."""
 
     name = normalize_text(name)
     country = normalize_text(country)
+    address = normalize_text(address)
 
     tokens = create_name_tokens(name)
 
-    return [
-        f"{token}|{country}"
-        for token in tokens
-    ]
+    # Address tokens
+    address_stopwords = {
+        "road", "street", "avenue", "lane",
+        "building", "block", "floor",
+        "near", "opp", "india", "usa", "france"
+    }
 
+    address_tokens = [
+        word
+        for word in address.split()
+        if len(word) >= 4 and word not in address_stopwords
+        ]
+
+    address_tokens = address_tokens[:3]
+
+    keys = []
+
+    # 1. Exact normalized name + country
+    if name and country:
+        keys.append(f"full|{name}|{country}")
+
+    # 2. Individual name tokens + country
+    for token in tokens:
+        if country:
+            keys.append(f"token|{token}|{country}")
+
+    # 3. Pairs of name tokens + country
+    if len(tokens) >= 2 and country:
+        for i in range(len(tokens)):
+            for j in range(i + 1, len(tokens)):
+                pair = "|".join(sorted([tokens[i], tokens[j]]))
+                keys.append(f"pair|{pair}|{country}")
+
+    # 4. Address token + country
+    for token in address_tokens:
+        if country:
+            keys.append(f"addr|{token}|{country}")
+
+    # 5. Name token + address token + country
+    for name_token in tokens[:3]:
+        for address_token in address_tokens:
+            if country:
+                keys.append(
+                    f"nameaddr|{name_token}|{address_token}|{country}"
+                )
+
+    return keys
 
 def get_candidates(source1_record, source2_index, source3_index):
     """
@@ -54,18 +110,23 @@ def get_candidates(source1_record, source2_index, source3_index):
     candidates3 = set()
 
     keys = make_block_keys(
-        source1_record["business_name"],
-        source1_record["country"]
+    source1_record["business_name"],
+    source1_record["country"],
+    source1_record.get("business_address", "")
     )
 
     for key in keys:
-        candidates2.update(
-            source2_index.get(key, set())
-        )
 
-        candidates3.update(
-            source3_index.get(key, set())
-        )
+        block2 = source2_index.get(key, set())
+        block3 = source3_index.get(key, set())
+
+        # Always keep exact full-name blocks.
+        # Ignore extremely large token blocks.
+        if key.startswith("full|") or len(block2) <= MAX_BLOCK_SIZE:
+            candidates2.update(block2)
+
+        if key.startswith("full|") or len(block3) <= MAX_BLOCK_SIZE:
+            candidates3.update(block3)
 
     return candidates2, candidates3
 
@@ -74,12 +135,14 @@ def build_block_index(file_path, chunksize=CHUNK_SIZE):
     """
     Build a blocking index from a TSV file.
 
+    Uses itertuples() instead of iterrows() for better performance.
+
     Returns:
         index:
             blocking key -> set of entity IDs
 
         records:
-            entity ID -> complete record
+            entity ID -> record dictionary
     """
 
     index = {}
@@ -91,30 +154,36 @@ def build_block_index(file_path, chunksize=CHUNK_SIZE):
         chunksize=chunksize
     ):
 
-        for _, row in chunk.iterrows():
+        for row in chunk.itertuples(index=False):
 
-            record = row.to_dict()
-
-            entity_id = record.get("entity_id")
+            entity_id = getattr(row, "entity_id", None)
 
             if pd.isna(entity_id):
                 continue
 
             entity_id = str(entity_id)
 
+            name = getattr(row, "business_name", "")
+            country = getattr(row, "country", "")
+            address = getattr(row, "business_address", "")
+
+            record = {
+                "entity_id": entity_id,
+                "business_name": name,
+                "business_address": address,
+                "country": country
+            }
+
             records[entity_id] = record
 
             keys = make_block_keys(
-                record.get("business_name", ""),
-                record.get("country", "")
+                name,
+                country,
+                address
             )
 
             for key in keys:
-
-                index.setdefault(
-                    key,
-                    set()
-                ).add(entity_id)
+                index.setdefault(key, set()).add(entity_id)
 
     return index, records
 
